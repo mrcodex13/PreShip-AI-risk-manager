@@ -1,0 +1,23 @@
+# Local Python environment
+PreShipAIpython/
+
+# Python cache and generated files
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local tooling and secrets
+.env
+.env.*
+.vscode/
+
+# Streamlit and notebook artifacts
+.streamlit/secrets.toml
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db

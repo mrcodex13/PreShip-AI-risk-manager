@@ -1,0 +1,6 @@
+"Traditional payment","Crypto payment"
+"Bank account identifies the recipient","Wallet address identifies the on-chain destination"
+"Bank may freeze an account","A blockchain transfer normally cannot be reversed"
+"One or a few banks may hold the funds","Assets may move across chains, bridges, mixers, wallets, and exchanges"
+"Identity is usually available at the bank","Identity may be available only when funds touch a regulated VASP"
+"Recovery may involve account reversal","Recovery usually requires freezing assets at a VASP or obtaining control through legal process"
