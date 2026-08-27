@@ -106,6 +106,15 @@ Measured final test results:
 | False negatives | 0 |
 | Test-set cost | ₹73,650 |
 
+### Confusion Matrix
+
+|  | Predicted safe | Predicted high-risk |
+|---|---:|---:|
+| **Actual safe** | 0 (TN) | 491 (FP) |
+| **Actual high-risk** | 0 (FN) | 509 (TP) |
+
+The current cost-selected threshold flags all 1,000 test orders. It achieves 100% recall, but every safe test order is sent to review. This produces 0 true negatives and 491 false positives, so this result should be treated as an honest baseline rather than a production-ready operating point.
+
 Interpretation: the model catches all positive labels at this cutoff, but its precision is approximately the base positive rate. The ROC-AUC and AUC-PR are close to 0.5, so this benchmark does not yet demonstrate strong predictive separation. The project should present this honestly and treat it as a working baseline that needs better data and features.
 
 The low cutoff is driven by the current cost assumptions and validation behavior. It is not a universal definition of “too much risk.” The merchant should change the cost inputs using actual operational loss measurements.

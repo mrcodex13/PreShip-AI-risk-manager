@@ -161,8 +161,10 @@ def metric_report(y_true, probabilities, threshold):
         "recall": recall_score(y_true, predicted, zero_division=0),
         "auc_pr": average_precision_score(y_true, probabilities),
         "roc_auc": roc_auc_score(y_true, probabilities),
+        "true_negatives": int(matrix[0, 0]),
         "false_positives": int(matrix[0, 1]),
         "false_negatives": int(matrix[1, 0]),
+        "true_positives": int(matrix[1, 1]),
     }
 
 
@@ -795,6 +797,17 @@ with metrics_tab:
     st.caption("Business impact is a planning estimate: every flagged order incurs verification cost, while every missed risky order incurs the configured loss. Replace these assumptions with measured merchant costs.")
     st.write(f"ROC-AUC: **{report['roc_auc']:.3f}** | False positives: **{report['false_positives']:,}** | False negatives: **{report['false_negatives']:,}**")
     st.write(f"False-positive cost: **₹{costs['false_positive_total']:,.0f}** | False-negative cost: **₹{costs['false_negative_total']:,.0f}**")
+    st.subheader("Confusion matrix")
+    confusion_table = pd.DataFrame(
+        [
+            [report["true_negatives"], report["false_positives"]],
+            [report["false_negatives"], report["true_positives"]],
+        ],
+        index=["Actual safe", "Actual high-risk"],
+        columns=["Predicted safe", "Predicted high-risk"],
+    )
+    st.dataframe(confusion_table, width="stretch")
+    st.caption("False positives are safe orders sent to verification. False negatives are high-risk orders that the model did not flag.")
     st.write(f"Blind-spot sentinel: **20%** of the hybrid score, flagging unusual numeric order profiles.")
     st.write(f"Always-review baseline: precision **{baseline_report['precision']:.1%}**, recall **{baseline_report['recall']:.1%}**, cost **₹{baseline_report['false_positives'] * false_positive_cost:,.0f}**")
     st.subheader("Choosing the review cutoff")

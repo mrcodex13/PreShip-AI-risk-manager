@@ -40,6 +40,17 @@ The supplied dataset contains 5,000 rows and a 50.92% positive high-risk label r
 | False positives | 491 |
 | False negatives | 0 |
 
+### Confusion Matrix
+
+The complete confusion matrix on the final held-out test set is:
+
+|  | Predicted safe | Predicted high-risk |
+|---|---:|---:|
+| **Actual safe** | 0 (TN) | 491 (FP) |
+| **Actual high-risk** | 0 (FN) | 509 (TP) |
+
+This means the current cost-selected threshold flags all 1,000 test orders. It achieves 100% recall but sends every safe test order to review, producing 0 true negatives and 491 false positives. This is an honest baseline, not a production-ready operating point. The threshold and model should be recalibrated using real merchant costs and stronger timestamped outcome data.
+
 These are benchmark results, not a production performance guarantee. The `0.05` cutoff means the configured costs strongly favor catching every labeled risky order, resulting in a very high review volume. Merchants should set costs from measured operational data.
 
 ## Important Data Limitation
