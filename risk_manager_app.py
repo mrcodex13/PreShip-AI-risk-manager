@@ -1,9 +1,16 @@
 """PreShip AI: defense-only return/RTO risk manager - Full Feature Version."""
 
+import sys
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Optional
 import json
 import uuid
+
+ROOT_DIR = Path(__file__).resolve().parent
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 import numpy as np
 import pandas as pd
@@ -98,7 +105,7 @@ CATEGORICAL_FEATURES = ["Gender", "State", "Category", "Brand"]
 # DATA & MODEL FUNCTIONS
 # ============================================================================
 
-def add_engineered_features(data: pd.DataFrame) -> pd.DataFrame:
+def add_engineered_features(data: pd.DataFrame, reference_data: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """Create business-relevant order features that align with return and RTO risk signals."""
     out = data.copy()
 
@@ -115,13 +122,60 @@ def add_engineered_features(data: pd.DataFrame) -> pd.DataFrame:
     out["Price_Above_Median"] = (price >= price.median()).astype(int)
     out["Quantity_Above_Median"] = (quantity >= quantity.median()).astype(int)
 
-    out["State_Risk_Prior"] = out["State"].map(out.groupby("State")["target"].mean())
-    out["Category_Risk_Prior"] = out["Category"].map(out.groupby("Category")["target"].mean())
-    out["Brand_Risk_Prior"] = out["Brand"].map(out.groupby("Brand")["target"].mean())
-    out["State_Category_Risk_Prior"] = out.groupby(["State", "Category"])["target"].transform("mean")
-    out["Brand_Category_Risk_Prior"] = out.groupby(["Brand", "Category"])["target"].transform("mean")
+    reference = reference_data if reference_data is not None and not reference_data.empty else out
+    if "target" in reference.columns:
+        out["State_Risk_Prior"] = out["State"].map(reference.groupby("State")["target"].mean())
+        out["Category_Risk_Prior"] = out["Category"].map(reference.groupby("Category")["target"].mean())
+        out["Brand_Risk_Prior"] = out["Brand"].map(reference.groupby("Brand")["target"].mean())
+        out["State_Category_Risk_Prior"] = out.apply(
+            lambda row: float(
+                reference[
+                    (reference["State"].astype(str) == str(row["State"]))
+                    & (reference["Category"].astype(str) == str(row["Category"]))
+                ]["target"].mean()
+            ) if not reference[
+                (reference["State"].astype(str) == str(row["State"]))
+                & (reference["Category"].astype(str) == str(row["Category"]))
+            ].empty else float(reference["target"].mean()),
+            axis=1,
+        )
+        out["Brand_Category_Risk_Prior"] = out.apply(
+            lambda row: float(
+                reference[
+                    (reference["Brand"].astype(str) == str(row["Brand"]))
+                    & (reference["Category"].astype(str) == str(row["Category"]))
+                ]["target"].mean()
+            ) if not reference[
+                (reference["Brand"].astype(str) == str(row["Brand"]))
+                & (reference["Category"].astype(str) == str(row["Category"]))
+            ].empty else float(reference["target"].mean()),
+            axis=1,
+        )
+    else:
+        out["State_Risk_Prior"] = 0.5
+        out["Category_Risk_Prior"] = 0.5
+        out["Brand_Risk_Prior"] = 0.5
+        out["State_Category_Risk_Prior"] = 0.5
+        out["Brand_Category_Risk_Prior"] = 0.5
 
     return out
+
+
+def build_order_feature_frame(raw_order: pd.DataFrame | dict, reference_data: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Normalize a one-row order into the exact feature schema expected by the model."""
+    if isinstance(raw_order, dict):
+        order = pd.DataFrame([raw_order])
+    else:
+        order = raw_order.copy()
+
+    missing = [column for column in BASE_FEATURES if column not in order.columns]
+    if missing:
+        raise ValueError(f"Order is missing required fields: {missing}")
+
+    if not set(FEATURES).issubset(order.columns):
+        order = add_engineered_features(order, reference_data=reference_data if reference_data is not None else data if "data" in globals() else None)
+
+    return order[FEATURES].copy()
 
 
 def load_data() -> pd.DataFrame:
@@ -371,7 +425,10 @@ def explain_prediction(model, order):
     preprocessor = pipeline.named_steps["preprocessor"]
     classifier = pipeline.named_steps["classifier"]
     transformed = preprocessor.transform(order[FEATURES])
-    contributions = np.asarray(transformed[0].todense()).ravel() * classifier.coef_[0]
+    if hasattr(transformed, "toarray"):
+        transformed = transformed.toarray()
+    transformed = np.asarray(transformed)
+    contributions = transformed[0].ravel() * classifier.coef_[0]
     names = preprocessor.get_feature_names_out()
     explanation = pd.DataFrame({"signal": names, "contribution": contributions})
     explanation["signal"] = explanation["signal"].str.replace(
@@ -1144,12 +1201,13 @@ with tabs[1]:
         submitted = st.form_submit_button("Assess risk")
 
     if submitted:
-        order = pd.DataFrame(
-            [{
+        order = build_order_feature_frame(
+            {
                 "Age": age, "Gender": gender, "State": state, "Category": category,
                 "Brand": brand, "Quantity": quantity, "Price": price,
                 "Discount": discount, "Product Rating": rating,
-            }]
+            },
+            reference_data=data,
         )
         
         # Get predictions
@@ -1454,10 +1512,10 @@ if use_tree_model:
         
         # Train tree model
         with st.spinner("Training LightGBM model for comparison..."):
-            x_train_preprocessed = model.named_steps['preprocessor'].fit_transform(
-                data[FEATURES]
-            ).toarray()
-             
+            x_train_preprocessed = model.named_steps['preprocessor'].fit_transform(data[FEATURES])
+            if hasattr(x_train_preprocessed, "toarray"):
+                x_train_preprocessed = x_train_preprocessed.toarray()
+
             tree_model = model_comparison.train_tree_model(
                 pd.DataFrame(x_train_preprocessed),
                 data['target'].values,
