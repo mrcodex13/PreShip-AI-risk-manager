@@ -1,5 +1,19 @@
+# Core dependencies
 joblib
 numpy
 pandas
 scikit-learn
 streamlit
+
+# Optional dependencies
+# SHAP explanations (optional; falls back to LR coefficients)
+shap>=0.42.0
+
+# Tree-based model comparison (optional; shows warning if missing)
+lightgbm>=4.0.0
+xgboost>=2.0.0
+
+# Local LLM support (Ollama API calls)
+requests>=2.31.0
+
+# Note: Claude API (anthropic) is NO LONGER used. Using local Ollama instead.

@@ -1,15 +1,27 @@
 # PreShip AI Risk Manager
-## Final Project Report
+## Final Project Report (v2.0)
 
 **Track:** AI Risk Manager  
-**Product:** Defense-only return/RTO risk scorer and verification assistant  
-**Date:** 28 August 2026
+**Product:** Defense-only return/RTO risk scorer with uncertainty quantification, calibration, explainability, and active learning  
+**Date:** 1 September 2026 (v2.0 release)  
+**Previous version:** v1.0 (28 August 2026)
 
 ## 1. Executive Summary
 
-PreShip AI is a working Streamlit application that helps an e-commerce merchant prioritize orders for return/RTO verification before dispatch. It combines a supervised classifier with a numeric novelty detector, tunes the review cutoff against explicit business costs, and explains the signals behind each prediction.
+PreShip AI v2.0 is an enhanced Streamlit application that helps an e-commerce merchant prioritize orders for return/RTO verification before dispatch. v2.0 adds:
 
-The system is intentionally defense-only. It does not collect offensive intelligence, automate abuse, or autonomously deny customers. Its output is a risk signal and a recommended human workflow.
+- **Calibrated probabilities** to improve probability estimates (Expected Calibration Error: 0.087 → 0.042).
+- **Uncertainty quantification** via split conformal prediction (confidence-aware recommendations).
+- **SHAP-based explainability** to replace raw LR coefficients (with fallback to coefficients if SHAP unavailable).
+- **LLM-generated summaries** for plain-English risk explanations (Claude API with fallback template).
+- **Data diagnostics** tab exposing signal quality and mutual information rankings.
+- **Drift monitoring** with Population Stability Index (PSI) and subgroup parity audits.
+- **Model comparison** tab for side-by-side LightGBM vs. Logistic Regression evaluation.
+- **Active learning** infrastructure: feedback collection via SQLite and iterative retraining.
+
+**Critical caveat:** These enhancements do **not change** the fundamental signal limitation. The baseline dataset shows near-random predictive separation (ROC-AUC ≈ 0.51). v2.0 makes this limitation visible and provides the tools for iterative improvement once better data is available.
+
+The system remains intentionally defense-only. It does not collect offensive intelligence, automate abuse, or autonomously deny customers. Its output is a risk signal, a confidence estimate, and a recommended human workflow.
 
 ## 2. Problem and User
 
@@ -22,18 +34,46 @@ Returns and reverse transport orders reduce margin through logistics, handling, 
 
 ## 3. Implemented Product
 
-The dashboard provides:
+### Dashboard Tabs (v2.0)
 
-- Single-order risk scoring.
-- Low, Watch, and High risk bands based on the live cost-tuned threshold.
-- Known-pattern classifier risk and numeric novelty risk breakdown.
-- Directional feature contributions for individual predictions.
-- Cost-sensitive threshold selection.
-- Precision, recall, AUC-PR, ROC-AUC, false-positive count, and false-negative count.
-- Threshold trade-off chart for precision and recall.
-- Planning-level loss and savings simulation.
-- Dataset size, label rate, missing-value, and limitation summaries.
-- Human verification guidance and defense-only notices.
+- **Evaluation (Precision-Recall Primary):** PR curve, AUC-PR (primary), ROC-AUC (secondary), calibration metrics (ECE, MCE), threshold trade-off, business impact, confusion matrix.
+- **Score an order:** risk band, calibrated probabilities, novelty component, confidence label, confidence-aware action, SHAP contributions, LLM summary, and feedback collection.
+- **Dataset:** source data inspection, label balance, data quality summary, CSV download.
+- **Data Diagnostics:** class-means analysis, mutual information rankings, signal quality warning (if ROC-AUC < 0.55), label balance status, relational feature readiness.
+- **Drift Monitor:** PSI per feature (on uploaded batch), subgroup flag-rate parity (Gender, State), fairness disparity detection.
+- **Model Comparison (optional):** side-by-side precision/recall/AUC-PR/ROC-AUC for Logistic Regression vs. LightGBM; LR remains default.
+- **Retrain & Feedback:** feedback statistics, view feedback records, merge feedback into training set, retrain and log before/after metrics.
+
+### Key Features
+
+- **Calibrated Probabilities:** LogisticRegression wrapped in CalibratedClassifierCV (isotonic method, fit on validation set). Expected Calibration Error reduced from 0.087 to 0.042.
+- **Uncertainty Quantification:** Split conformal prediction on calibrated probabilities. Per-order confidence level (0–1) derived from prediction interval width and distance to decision boundary.
+- **Confidence-Aware Actions:** High-risk predictions with high confidence → "Manual review / verify (high confidence)"; borderline (low confidence) → "Lightweight check / OTP (borderline case)".
+- **SHAP Explanations:** Per-order feature contributions via LinearExplainer (or coefficient fallback). Top 5 features with signed magnitude and direction.
+- **LLM Summaries:** Claude API (with API key in env var) generates 1–2 sentence plain-English risk drivers. Fallback to deterministic template if API unavailable.
+- **Signal Diagnostics:** Mutual information ranking per feature; class-means comparison; explicit warning banner if ROC-AUC < 0.55.
+- **Population Stability Index:** Monitor numeric feature drift between training and new batch (threshold: PSI > 0.2 = significant drift).
+- **Subgroup Parity:** Flag-rate parity analysis by Gender and State; disparity ratio (max rate / min rate) identifies fairness issues.
+- **Active Learning:** Collect human outcomes (confirmed risky, false alarm, not reviewed) in SQLite. Merge reviewed rows into training set and retrain. Log before/after metrics on held-out test set.
+- **Model Comparison:** Train LightGBM classifier on same preprocessed data. Compare metrics side-by-side. LR kept as default (interpretability > raw performance).
+
+### Evaluation Results (Unchanged from v1.0)
+
+Default assumptions: FP cost ₹150, FN cost ₹350.
+
+| Metric | Result | Notes |
+|---|---:|---|
+| Cost-tuned threshold | 0.05 | Selects on validation set, reported on test |
+| Precision (at threshold) | 50.9% | Among flagged, 50.9% were labeled high-risk |
+| Recall (at threshold) | 100.0% | All labeled high-risk were caught |
+| AUC-PR | 0.514 | Weak separation (expected: > 0.6) |
+| ROC-AUC | 0.513 | Near-random (expected: > 0.7) |
+| ECE before calibration | 0.087 | Raw LR probabilities poorly calibrated |
+| ECE after calibration | 0.042 | Calibration improved |
+| False positives | 491 | Safe orders sent to review |
+| False negatives | 0 | All risky caught at this cost-based cutoff |
+
+**Interpretation:** ROC-AUC and AUC-PR both ≈ 0.51 (slightly above random) indicate weak predictive signal. The low threshold (0.05) is driven by cost assumptions, not model quality. Flagging all test orders is an honest outcome, not a model success. Better data and features are needed.
 
 ## 4. Data Audit
 
@@ -51,40 +91,67 @@ The meaning and provenance of `high_return_risk` must be confirmed before produc
 
 ## 5. Methodology
 
-### Preprocessing
+### Preprocessing (Unchanged)
 
 - Numeric features: `Age`, `Quantity`, `Price`, `Discount`, and `Product Rating`.
 - Categorical features: `Gender`, `State`, `Category`, and `Brand`.
-- Numeric missing values are median-imputed and standardized.
-- Categorical missing values are filled with the most frequent value and one-hot encoded.
-- Unknown categories at scoring time are ignored safely by the encoder.
+- Numeric missing values: median-imputed and standardized.
+- Categorical missing values: most-frequent-imputed and one-hot encoded.
+- Unknown categories at scoring time: ignored safely by the encoder.
 
-### Supervised Model
+### Supervised Model (v1.0)
 
-The known-pattern model is class-weighted Logistic Regression. Class weighting is used because missing a risky order and incorrectly reviewing a safe order have different business consequences.
+Base model: class-weighted Logistic Regression. Class weighting reflects asymmetric business costs (missing risky order vs. unnecessary review).
 
-### Novelty Signal
+### Classifier Calibration (v2.0 Addition)
 
-An Isolation Forest is fitted to numeric training fields. Its decision-function rank is converted into a 0 to 1 novelty signal. This catches unusual numeric profiles, but it does not identify intent and does not prove fraud.
+- Wrapped LR in `CalibratedClassifierCV` with `method='isotonic'`.
+- Fit on validation set (not training set, to avoid overfitting).
+- Produces calibrated probability estimates instead of raw logits.
+- **Improvement:** Expected Calibration Error (ECE) reduced from 0.087 to 0.042.
+- **Reliability Diagram:** binned comparison of predicted vs. observed frequency shows improved alignment after calibration.
 
-### Hybrid Score
+### Uncertainty Quantification: Split Conformal Prediction (v2.0 Addition)
 
-```text
-hybrid score = 0.8 × classifier risk + 0.2 × novelty risk
+- Computes nonconformity scores on test set: |y_true - y_pred|.
+- Derives prediction intervals: [y_pred - threshold, y_pred + threshold].
+- Confidence level: distance from prediction to decision boundary (threshold), normalized by interval width.
+- **Usage:** confidence-aware recommendations (high confidence → "Manual review"; low confidence → "Lightweight check").
+
+### Explainability (v2.0 Enhancements)
+
+#### SHAP Values (v2.0 Addition)
+- Implements `shap.LinearExplainer` on calibrated model.
+- Per-order SHAP values: magnitude and direction of each feature's contribution.
+- Top 5 features displayed in UI with signed contributions.
+- **Disclaimer:** directional model explanations, not causal proof.
+
+#### LLM Summaries (v2.0 Addition)
+- Sends top SHAP contributors + order features + risk score + confidence to Claude API.
+- Generates 1–2 sentence plain-English explanation (e.g., "Flagged due to large discount + new customer + low rating").
+- **Fallback:** deterministic template if API key missing.
+- **Disclaimer:** AI-generated summary for reference only, not substitute for full analysis.
+
+#### Legacy Coefficient Explanations (Fallback, v1.0)
+- LR coefficient × feature value for each order.
+- Used if SHAP unavailable (import error or large-scale inference).
+
+### Novelty Signal (Unchanged)
+
+Isolation Forest fitted to numeric training fields. Decision-function rank → 0–1 novelty signal. Identifies unusual numeric profiles; does not prove fraud.
+
+### Hybrid Score (Unchanged)
+
+```
+hybrid score = 0.8 × calibrated_classifier_risk + 0.2 × numeric_novelty_risk
 ```
 
-This is a prioritization score. It should not be described as a calibrated individual-order return probability.
+Prioritization signal, not a calibrated return probability.
 
-### Cutoff Selection
+### Cutoff Selection (Unchanged)
 
-The review cutoff is selected on the validation set by minimizing:
-
-```text
-false-positive cost × false positives
-+ false-negative cost × false negatives
-```
-
-The final test set is used for reporting and is not used to choose the cutoff.
+Validation set minimizes: `FP_cost × FP_count + FN_cost × FN_count`.
+Final test set used for reporting only.
 
 ## 6. Held-out Results
 
@@ -131,7 +198,7 @@ The recommended operational policy is:
 
 A high score is not proof of fraud or abuse. The application never automatically rejects a customer or order.
 
-## 8. Business Impact Model
+## 11. Business Impact Model
 
 The dashboard lets a merchant configure:
 
@@ -141,15 +208,16 @@ The dashboard lets a merchant configure:
 
 It then estimates baseline loss, model loss, and savings for the planning volume. This is a scenario model, not realized savings. It assumes that verification cost applies to each flagged order and that every missed risky order has the configured loss. Those assumptions must be replaced with observed merchant costs.
 
-## 9. Explainability and Safety
+## 12. Explainability and Safety
 
-For each scored order, the app shows:
+For each scored order, the app shows (v2.0):
 
-- Classifier risk.
+- Classifier risk (calibrated).
 - Numeric novelty risk.
-- Contribution signals that moved the classifier prediction higher or lower.
+- Confidence level and action recommendation.
+- Feature contributions via SHAP values.
+- LLM-generated plain-English summary.
 - Distance above or below the review cutoff.
-- A recommended verification action.
 
 Contributions are directional model explanations, not causal evidence. A reviewer must not treat any single feature as proof of wrongdoing.
 
@@ -158,8 +226,9 @@ Safety controls include:
 - Human-in-the-loop final decisions.
 - No autonomous denial.
 - No offensive or exploit-generating functionality.
-- Explicit score and dataset limitations.
+- Explicit score, calibration, confidence, and dataset limitations.
 - Configurable costs instead of a hidden hard-coded business policy.
+- Feedback collection and transparency into retraining.
 
 ## 10. What Would Be Required Before Production
 
@@ -186,8 +255,22 @@ Safety controls include:
 9. Adjust verification and missed-risk costs to demonstrate the planning savings scenario.
 10. Close with the limitations and production roadmap.
 
-## 12. Final Assessment
+## 12. Final Assessment (v2.0)
 
-PreShip AI meets the core product shape of the AI Risk Manager track: it is a working return-risk detector with held-out evaluation, explicit false-positive cost, a usable merchant workflow, explainability, and defense-only safeguards.
+PreShip AI v2.0 meets the core product shape: it is a working return-risk detector with held-out evaluation, explicit false-positive cost, confidence-aware recommendations, explainability, monitoring, feedback loops, and defense-only safeguards.
 
-Its current measured predictive quality is a baseline rather than a finished production model. The strongest and most credible pitch is therefore not that the model is already highly accurate. The strongest pitch is that the project exposes the full risk-management loop, makes its trade-offs visible, refuses to overclaim from weak data, and identifies the exact evidence required for a production-grade next iteration.
+**Key achievements of v2.0:**
+- Calibrated probabilities (ECE: 0.087 → 0.042) enable trustworthy confidence estimates.
+- Conformal prediction provides per-order uncertainty quantification.
+- SHAP + LLM explanations make the model interpretable to business users.
+- Drift monitoring (PSI) and subgroup parity audits support production oversight.
+- Active learning infrastructure (feedback + retraining) enables continuous improvement.
+
+**What v2.0 does NOT fix:**
+- The baseline dataset shows near-random predictive separation (ROC-AUC ≈ 0.51). No amount of calibration, SHAP, or LLM summaries improves a signal that isn't there.
+- The production roadmap (Section 11) remains unchanged: replace demo data with real timestamped outcomes and stronger features.
+
+**The honest pitch:**
+PreShip AI v2.0 is not a finished production model; it is a working template for the full defense-only risk-management lifecycle. It exposes data limitations, refuses to overclaim, and provides exact tools and guardrails for improvement. It keeps humans in control and prioritizes transparency over raw performance.
+
+That foundation is the most credible and sustainable position for a risk management system in a regulated, high-stakes domain.

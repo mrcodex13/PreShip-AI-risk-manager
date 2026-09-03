@@ -1,9 +1,8 @@
-"""PreShip AI: defense-only return/RTO risk manager - Full Feature Version."""
+"""PreShip AI: defense-only return/RTO risk manager."""
 
 from pathlib import Path
 from datetime import datetime, timezone
 import json
-import uuid
 
 import numpy as np
 import pandas as pd
@@ -19,23 +18,10 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     roc_auc_score,
-    roc_curve,
-    precision_recall_curve,
 )
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-
-# Import new modules
-import data_diagnostics
-import calibration
-import conformal
-import shap_explain
-import relational_features
-import drift
-import model_comparison
-import llm_explain
-import feedback
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -43,8 +29,6 @@ DATA_PATH = APP_DIR / "data" / "Export_Product_Return_Data.csv"
 MODEL_DIR = APP_DIR / "models"
 MODEL_PATH = MODEL_DIR / "preship_risk_models.joblib"
 METADATA_PATH = MODEL_DIR / "metadata.json"
-FEEDBACK_DB_PATH = APP_DIR / "feedback.db"
-
 FEATURES = [
     "Age",
     "Gender",
@@ -59,10 +43,6 @@ FEATURES = [
 NUMERIC_FEATURES = ["Age", "Quantity", "Price", "Discount", "Product Rating"]
 CATEGORICAL_FEATURES = ["Gender", "State", "Category", "Brand"]
 
-
-# ============================================================================
-# DATA & MODEL FUNCTIONS
-# ============================================================================
 
 def load_data() -> pd.DataFrame:
     data = pd.read_csv(DATA_PATH)
@@ -100,7 +80,7 @@ def build_model() -> Pipeline:
 
 
 def anomaly_risk(values, reference_scores):
-    """Convert Isolation Forest scores into an interpretable 0–1 novelty risk."""
+    """Convert Isolation Forest scores into an interpretable 0-1 novelty risk."""
     return 1 - np.array([np.mean(reference_scores <= value) for value in values])
 
 
@@ -113,7 +93,7 @@ def save_model_bundle(model, sentinel, reference_scores):
             "reference_scores": reference_scores,
             "features": FEATURES,
             "numeric_features": NUMERIC_FEATURES,
-            "model_version": "2.0",
+            "model_version": "1.0",
         },
         MODEL_PATH,
     )
@@ -123,7 +103,7 @@ def save_model_bundle(model, sentinel, reference_scores):
                 "saved_at_utc": datetime.now(timezone.utc).isoformat(),
                 "training_data": str(DATA_PATH.relative_to(APP_DIR)),
                 "model_path": str(MODEL_PATH.relative_to(APP_DIR)),
-                "purpose": "Defense-only return/RTO risk scoring with uncertainty quantification and human feedback integration",
+                "purpose": "Defense-only return/RTO risk scoring and human verification support",
             },
             indent=2,
         ),
@@ -139,45 +119,25 @@ def train_model(data: pd.DataFrame):
     x_validation, x_test, y_validation, y_test = train_test_split(
         x_holdout, y_holdout, test_size=0.5, random_state=42, stratify=y_holdout
     )
-    
-    # Train base model
     model = build_model()
     model.fit(x_train, y_train)
-    
-    # Get validation probabilities for threshold selection
     validation_probabilities = model.predict_proba(x_validation)[:, 1]
-    
-    # Calibrate the classifier
-    calibrated_model, calibration_metadata = calibration.calibrate_classifier(model, x_validation, y_validation)
-    
-    # Get calibrated probabilities
-    calibrated_validation_proba = calibrated_model.predict_proba(x_validation)[:, 1]
-    calibrated_test_proba = calibrated_model.predict_proba(x_test)[:, 1]
-    
-    # Train Isolation Forest
+    probabilities = model.predict_proba(x_test)[:, 1]
     sentinel = IsolationForest(n_estimators=150, contamination="auto", random_state=42)
     sentinel.fit(x_train[NUMERIC_FEATURES])
+    save_model_bundle(model, sentinel, sentinel.decision_function(x_train[NUMERIC_FEATURES]))
     reference_scores = sentinel.decision_function(x_train[NUMERIC_FEATURES])
-    
-    # Compute novelty scores
     validation_anomaly = anomaly_risk(
         sentinel.decision_function(x_validation[NUMERIC_FEATURES]), reference_scores
     )
     test_anomaly = anomaly_risk(
         sentinel.decision_function(x_test[NUMERIC_FEATURES]), reference_scores
     )
-    
-    # Hybrid scores
-    validation_risk = 0.8 * calibrated_validation_proba + 0.2 * validation_anomaly
-    test_risk = 0.8 * calibrated_test_proba + 0.2 * test_anomaly
-    
-    # Save model
-    save_model_bundle(model, sentinel, reference_scores)
-    
+    validation_risk = 0.8 * validation_probabilities + 0.2 * validation_anomaly
+    test_risk = 0.8 * probabilities + 0.2 * test_anomaly
     return (
-        model, calibrated_model, sentinel, reference_scores,
-        y_validation, validation_risk, x_test, y_test, test_risk, 
-        test_anomaly, calibrated_test_proba
+        model, sentinel, reference_scores, y_validation, validation_risk,
+        x_test, y_test, test_risk, test_anomaly,
     )
 
 
@@ -250,25 +210,9 @@ def risk_band(score, threshold):
     return "Low: proceed"
 
 
-def _get_explanation_pipeline(model):
-    """Return the fitted preprocessing/classifier pipeline behind calibration."""
-    if hasattr(model, "named_steps"):
-        return model
-
-    calibrated_classifiers = getattr(model, "calibrated_classifiers_", None)
-    if calibrated_classifiers:
-        estimator = getattr(calibrated_classifiers[0], "estimator", None)
-        if estimator is not None and hasattr(estimator, "named_steps"):
-            return estimator
-
-    raise TypeError("Expected a fitted model pipeline or calibrated pipeline.")
-
-
 def explain_prediction(model, order):
-    """Explain prediction using the fitted model pipeline coefficients."""
-    pipeline = _get_explanation_pipeline(model)
-    preprocessor = pipeline.named_steps["preprocessor"]
-    classifier = pipeline.named_steps["classifier"]
+    preprocessor = model.named_steps["preprocessor"]
+    classifier = model.named_steps["classifier"]
     transformed = preprocessor.transform(order[FEATURES])
     contributions = np.asarray(transformed[0].todense()).ravel() * classifier.coef_[0]
     names = preprocessor.get_feature_names_out()
@@ -278,10 +222,6 @@ def explain_prediction(model, order):
     )
     return explanation.sort_values("contribution", ascending=False)
 
-
-# ============================================================================
-# STYLING & HERO
-# ============================================================================
 
 st.set_page_config(page_title="PreShip AI Risk Manager", page_icon="🛡️", layout="wide")
 st.markdown(
@@ -526,6 +466,13 @@ st.markdown(
 
         box-shadow:
             0 8px 25px rgba(0,0,0,0.18);
+    }
+
+
+    /* Highlight first part of THE BAR */
+
+    .bar::first-line {
+        color: #22d3ee;
     }
 
 
@@ -775,7 +722,7 @@ st.markdown(
 
     <div class="risk-hero">
         <h1>PreShip AI Risk Manager</h1>
-        <p>Known-pattern scoring with blind-spot detection, uncertainty quantification, and human feedback integration.</p>
+        <p>Known-pattern scoring plus a blind-spot sentinel for Indian returns and RTO.</p>
     </div>
 
 
@@ -785,7 +732,7 @@ st.markdown(
 
     <div>
         <strong>🛡️ THE BAR:</strong>
-        Honest metrics · Explicit false-positive cost · Defense-only decisions · Confidence-aware actions.
+        Honest metrics · Explicit false-positive cost · Defense-only decisions.
     </div>
 
     """,
@@ -793,27 +740,15 @@ st.markdown(
 )
 st.caption("A risk signal supports verification. It never automatically rejects a customer or order.")
 
-# ============================================================================
-# LOAD DATA & TRAIN MODEL
-# ============================================================================
-
 try:
     data = load_data()
-    (
-        model, calibrated_model, sentinel, reference_scores,
-        y_validation, validation_risk, x_test, y_test, test_risk,
-        test_anomaly, calibrated_test_proba
-    ) = train_model(data)
+    model, sentinel, reference_scores, y_validation, validation_risk, x_test, y_test, probabilities, test_anomaly = train_model(data)
 except Exception as error:
     st.error(f"Could not load or train the model: {error}")
     st.stop()
 
 if MODEL_PATH.exists():
-    st.caption(f"Saved model bundle: `{MODEL_PATH.relative_to(APP_DIR)}` (v2.0: calibrated + conformal-ready)")
-
-# ============================================================================
-# SIDEBAR CONTROLS
-# ============================================================================
+    st.caption(f"Saved model bundle: `{MODEL_PATH.relative_to(APP_DIR)}`")
 
 with st.sidebar:
     st.header("Cost assumptions")
@@ -822,13 +757,11 @@ with st.sidebar:
     verification_cost = st.number_input("Verification cost per flagged order (₹)", min_value=0, value=8, step=1)
     missed_order_loss = st.number_input("Loss when a risky order is missed (₹)", min_value=0, value=350, step=25)
     planning_volume = st.number_input("Planning volume (orders)", min_value=100, value=1000, step=100)
-    
     threshold, expected_cost = threshold_for_cost(
         y_validation, validation_risk, false_positive_cost, false_negative_cost
     )
     st.metric("Cost-tuned threshold", f"{threshold:.2f}")
     st.caption("This threshold is selected on validation data and then reported on the untouched test set.")
-    
     st.subheader("How to read the score")
     st.markdown(
         f"**Low:** below `{threshold * 0.5:.2f}`  \n"
@@ -836,121 +769,34 @@ with st.sidebar:
         f"**High:** `{threshold:.2f}` or above"
     )
     st.caption("High means the score crosses the model's cost-based review cutoff. It is not proof of abuse and never auto-rejects an order.")
-    
-    # Model selection
-    st.subheader("Model selection")
-    use_tree_model = st.checkbox("Compare with tree model (LightGBM)?", value=False)
-    
-    # LLM status (Ollama)
-    st.subheader("LLM Settings")
-    ollama_status = llm_explain.get_ollama_status()
-    if ollama_status["running"]:
-        st.success(f"✅ Ollama is running")
-        if "qwen2.5:7b" in ollama_status.get("models", []):
-            st.caption("✅ qwen2.5:7b model is loaded")
-        else:
-            st.warning("⚠️ qwen2.5:7b model not found. Order summaries will use fallback template.")
-            st.caption("To load: `ollama pull qwen2.5:7b`")
-    else:
-        st.warning("⚠️ Ollama not running")
-        st.caption(
-            "LLM order summaries unavailable. To enable: \n"
-            "1. Install Ollama from https://ollama.ai \n"
-            "2. Run: `ollama serve` \n"
-            "3. Load model: `ollama pull qwen2.5:7b`"
-        )
 
-# ============================================================================
-# COMPUTE METRICS & DIAGNOSTICS
-# ============================================================================
-
-report = metric_report(y_test, calibrated_test_proba, threshold)
+report = metric_report(y_test, probabilities, threshold)
 costs = cost_report(report, false_positive_cost, false_negative_cost)
 baseline_report = metric_report(y_test, np.ones(len(y_test)), 0.5)
-tradeoff = threshold_tradeoff(y_test, calibrated_test_proba, false_positive_cost, false_negative_cost)
-flagged_rate = float(np.mean(calibrated_test_proba >= threshold))
+tradeoff = threshold_tradeoff(y_test, probabilities, false_positive_cost, false_negative_cost)
+flagged_rate = float(np.mean(probabilities >= threshold))
 baseline_loss = float(np.mean(y_test) * missed_order_loss)
 model_loss = flagged_rate * verification_cost + (report["false_negatives"] / len(y_test)) * missed_order_loss
 estimated_savings = (baseline_loss - model_loss) * planning_volume
+metrics_tab, predict_tab, data_tab = st.tabs(["Evaluation", "Score an order", "Dataset"])
 
-# Compute diagnostics
-class_means = data_diagnostics.compute_class_means(data, NUMERIC_FEATURES)
-mutual_info = data_diagnostics.compute_mutual_information(data, NUMERIC_FEATURES)
-signal_diagnosis = data_diagnostics.diagnose_signal_quality(report["roc_auc"])
-label_balance = data_diagnostics.label_balance_info(data)
-
-# Conformal prediction
-nonconf_scores = conformal.nonconformity_scores(y_test, calibrated_test_proba)
-calib_proba_lower, calib_proba_upper = conformal.conformal_confidence_interval(
-    calibrated_test_proba, nonconf_scores, alpha=0.1
-)
-
-# Compute subgroup parity
-subgroup_flag_rates = drift.flag_rate_by_subgroup(
-    x_test, calibrated_test_proba, threshold, ['Gender', 'State']
-)
-
-# ============================================================================
-# TABS: EVALUATION, PREDICT, DATA, DIAGNOSTICS, DRIFT, MODEL COMPARISON, FEEDBACK
-# ============================================================================
-
-tab_names = ["Evaluation", "Score an order", "Dataset", "Data Diagnostics", "Drift Monitor", "Model Comparison", "Retrain & Feedback"]
-
-if not use_tree_model:
-    tab_names.remove("Model Comparison")
-    
-tabs = st.tabs(tab_names)
-
-# ============================================================================
-# TAB: EVALUATION (Precision-Recall First)
-# ============================================================================
-
-with tabs[0]:
+with metrics_tab:
     st.subheader("Held-out test set results")
     st.write(f"Training: {len(data) - len(y_validation) - len(y_test):,} | Validation: {len(y_validation):,} | Final test: {len(y_test):,} orders")
     st.caption("The validation set chooses the cost threshold. The final test set is used once for the metrics below.")
-    
-    # PRECISION-RECALL (PRIMARY)
-    st.subheader("📊 Precision-Recall Curve (PRIMARY)")
-    st.caption(
-        "For this use case, Precision-Recall is more decision-relevant than ROC-AUC. "
-        "PR focuses on the positive class (high-risk) and is robust to class imbalance."
-    )
-    
-    precision_vals, recall_vals, _ = precision_recall_curve(y_test, calibrated_test_proba)
-    pr_data = pd.DataFrame({
-        'Recall': recall_vals,
-        'Precision': precision_vals
-    })
-    st.line_chart(pr_data.set_index('Recall'), height=400)
-    
     cards = st.columns(4)
     cards[0].metric("Precision", f"{report['precision']:.1%}")
     cards[1].metric("Recall", f"{report['recall']:.1%}")
     cards[2].metric("AUC-PR", f"{report['auc_pr']:.3f}")
     cards[3].metric("Test-set cost", f"₹{costs['total']:,.0f}")
-    
-    # ROC-AUC (SECONDARY)
-    st.subheader("ROC-AUC Curve (secondary)")
-    st.caption("ROC-AUC provided for reference; PR-AUC is the primary decision metric.")
-    
-    fpr, tpr, _ = roc_curve(y_test, calibrated_test_proba)
-    roc_data = pd.DataFrame({
-        'FPR': fpr,
-        'TPR': tpr
-    })
-    st.line_chart(roc_data.set_index('FPR'), height=300)
-    st.metric("ROC-AUC", f"{report['roc_auc']:.3f}")
-    
-    # Business impact
     impact = st.columns(4)
     impact[0].metric("Flag rate", f"{flagged_rate:.1%}")
     impact[1].metric("Baseline loss / order", f"₹{baseline_loss:,.0f}")
     impact[2].metric("Model loss / order", f"₹{model_loss:,.0f}")
     impact[3].metric(f"Estimated savings / {planning_volume:,.0f}", f"₹{estimated_savings:,.0f}")
     st.caption("Business impact is a planning estimate: every flagged order incurs verification cost, while every missed risky order incurs the configured loss. Replace these assumptions with measured merchant costs.")
-    
-    # Confusion matrix
+    st.write(f"ROC-AUC: **{report['roc_auc']:.3f}** | False positives: **{report['false_positives']:,}** | False negatives: **{report['false_negatives']:,}**")
+    st.write(f"False-positive cost: **₹{costs['false_positive_total']:,.0f}** | False-negative cost: **₹{costs['false_negative_total']:,.0f}**")
     st.subheader("Confusion matrix")
     confusion_table = pd.DataFrame(
         [
@@ -962,55 +808,28 @@ with tabs[0]:
     )
     st.dataframe(confusion_table, width="stretch")
     st.caption("False positives are safe orders sent to verification. False negatives are high-risk orders that the model did not flag.")
-    
-    st.write(f"False-positive cost: **₹{costs['false_positive_total']:,.0f}** | False-negative cost: **₹{costs['false_negative_total']:,.0f}**")
-    
-    # Calibration metrics
-    st.subheader("Classifier calibration")
-    raw_proba = model.predict_proba(x_test)[:, 1]
-    calib_metrics = calibration.calibration_improvement_metrics(y_test, raw_proba, calibrated_test_proba)
-    
-    cal_cols = st.columns(4)
-    cal_cols[0].metric("ECE before", f"{calib_metrics['ECE_before']:.3f}")
-    cal_cols[1].metric("ECE after", f"{calib_metrics['ECE_after']:.3f}")
-    cal_cols[2].metric("MCE before", f"{calib_metrics['MCE_before']:.3f}")
-    cal_cols[3].metric("MCE after", f"{calib_metrics['MCE_after']:.3f}")
-    st.caption("ECE (Expected Calibration Error) and MCE (Maximum Calibration Error) measure probability calibration. Lower is better.")
-    
-    # Threshold trade-off
+    st.write(f"Blind-spot sentinel: **20%** of the hybrid score, flagging unusual numeric order profiles.")
+    st.write(f"Always-review baseline: precision **{baseline_report['precision']:.1%}**, recall **{baseline_report['recall']:.1%}**, cost **₹{baseline_report['false_positives'] * false_positive_cost:,.0f}**")
     st.subheader("Choosing the review cutoff")
     st.line_chart(tradeoff.set_index("Threshold")[["Precision", "Recall"]], y_label="Rate", x_label="Review threshold")
     st.caption("Raising the cutoff usually reduces reviews but can miss more risky orders. The selected cutoff minimizes the configured validation cost; it is not universally correct.")
-    
     with st.expander("What these numbers mean"):
         st.markdown(
             "- **Precision:** among flagged orders, the share that were high-return-risk in the test labels.\n"
             "- **Recall:** among high-return-risk orders, the share the model flagged.\n"
-            "- **AUC-PR:** area under the Precision-Recall curve; ranges 0–1 (1 = perfect ranking).\n"
-            "- **ROC-AUC:** area under the ROC curve; provided for reference but less decision-relevant here.\n"
-            "- **ECE/MCE:** Expected and Maximum Calibration Error; measure how well probabilities match true frequencies.\n"
+            "- **AUC-PR / ROC-AUC:** ranking quality across many possible cutoffs; they are not the order's risk score.\n"
             "- **False positive:** a safer order sent to verification. **False negative:** a risky order allowed through.\n"
             "- The cutoff is chosen by `false-positive cost × false positives + false-negative cost × false negatives`.\n"
             "- The hybrid score is a prioritization signal, not a calibrated probability that an individual order will be returned."
         )
-    
     with st.expander("What the model looks at"):
         st.write("Customer: age and gender | Order: quantity, price, discount | Product: category, brand, rating | Context: state")
-        st.write(f"**Blind-spot sentinel:** 20% of the hybrid score, flagging unusual numeric order profiles.")
-        st.write(f"**Classifier:** 80% from calibrated Logistic Regression (class-weighted).")
         st.caption("The novelty sentinel checks whether the numeric profile looks unusual compared with training data. It does not identify intent or prove fraud.")
-    
     with st.expander("Evaluation limitations"):
         st.warning("The source file contains one repeated timestamp, so a future-based time split cannot be verified. Results use a stratified 60/20/20 train, validation, and test split and should be treated as a benchmark until timestamped production data is available.")
-    
     st.info("A flag is a recommendation for verification, never an automatic denial or customer action.")
 
-
-# ============================================================================
-# TAB: SCORE AN ORDER (with Conformal & SHAP & LLM)
-# ============================================================================
-
-with tabs[1]:
+with predict_tab:
     st.subheader("Score one order")
     with st.form("order_form"):
         left, right = st.columns(2)
@@ -1025,8 +844,6 @@ with tabs[1]:
             price = st.number_input("Price (₹)", 1.0, 100000.0, 700.0)
             discount = st.number_input("Discount (%)", 0.0, 100.0, 20.0)
             rating = st.number_input("Product rating", 1.0, 5.0, 3.5, step=0.5)
-        
-        include_feedback = st.checkbox("Record feedback after scoring?", value=False)
         submitted = st.form_submit_button("Assess risk")
 
     if submitted:
@@ -1037,126 +854,32 @@ with tabs[1]:
                 "Discount": discount, "Product Rating": rating,
             }]
         )
-        
-        # Get predictions
-        probability = float(calibrated_model.predict_proba(order[FEATURES])[:, 1][0])
+        probability = float(model.predict_proba(order[FEATURES])[:, 1][0])
         novelty = float(anomaly_risk(
             sentinel.decision_function(order[NUMERIC_FEATURES]), reference_scores
         )[0])
         risk_score = 0.8 * probability + 0.2 * novelty
-        
-        # Conformal prediction (using test set calibration)
-        order_proba_lower = np.clip(probability - np.median(np.abs(y_test - calibrated_test_proba)), 0, 1)
-        order_proba_upper = np.clip(probability + np.median(np.abs(y_test - calibrated_test_proba)), 0, 1)
-        confidence = conformal.confidence_level_for_prediction(probability, order_proba_lower, order_proba_upper, threshold)
-        
-        # Display main score
+        action = action_for_probability(risk_score, threshold)
         st.metric("Hybrid return/RTO risk score", f"{risk_score:.1%}")
-        risk_band_text = risk_band(risk_score, threshold)
-        st.write(f"Risk band: **{risk_band_text}**")
-        st.write(f"Known-pattern risk: **{probability:.1%}** (calibrated, 80% of score) | Blind-spot novelty: **{novelty:.1%}** (20% of score)")
-        
-        # Confidence label
-        conf_label = conformal.confidence_label(confidence, risk_band_text.split(':')[0])
-        st.write(f"**Confidence:** {conf_label}")
-        
-        # Recommended action with confidence
-        action = conformal.recommended_action_with_confidence(risk_score, risk_band_text.split(':')[0], confidence, threshold)
-        st.warning(action)
-        
+        st.write(f"Risk band: **{risk_band(risk_score, threshold)}**")
+        st.write(f"Known-pattern risk: **{probability:.1%}** (80% of score) | Blind-spot novelty: **{novelty:.1%}** (20% of score)")
         st.caption(f"Review cutoff: {threshold:.1%}. This order is {('above' if risk_score >= threshold else 'below')} the cutoff by {abs(risk_score - threshold):.1%}.")
         st.caption("The score ranks orders for attention; it is not a guaranteed return probability.")
-        
-        # SHAP explanation
+        explanation = explain_prediction(model, order)
+        positive_signals = explanation[explanation["contribution"] > 0].head(3)
+        negative_signals = explanation[explanation["contribution"] < 0].sort_values("contribution").head(3)
         with st.expander("Why this order received this score", expanded=True):
-            st.write("**SHAP Feature Contributions** (top 5):")
-            shap_values, shap_df = shap_explain.compute_shap_values(
-                calibrated_model, order
-            )
-            
-            if shap_df is not None:
-                top_shap = shap_explain.top_shap_contributors(
-                    shap_values, list(shap_df.columns), top_n=5
-                )
-                if top_shap is not None:
-                    st.dataframe(top_shap, hide_index=True, width="stretch")
-                    st.caption("SHAP values show each feature's contribution to the risk score direction. Positive = increases risk, Negative = decreases risk.")
-            else:
-                # Fallback: use LR coefficients
-                explanation = explain_prediction(calibrated_model, order)
-                positive_signals = explanation[explanation["contribution"] > 0].head(3)
-                negative_signals = explanation[explanation["contribution"] < 0].sort_values("contribution").head(3)
-                
-                if not positive_signals.empty:
-                    st.write("Signals pushing risk higher:")
-                    st.dataframe(positive_signals.assign(contribution=positive_signals["contribution"].map(lambda value: f"+{value:.2f}")), hide_index=True, width="stretch")
-                if not negative_signals.empty:
-                    st.write("Signals pushing risk lower:")
-                    st.dataframe(negative_signals.assign(contribution=negative_signals["contribution"].map(lambda value: f"{value:.2f}")), hide_index=True, width="stretch")
-                st.caption("Contributions show how the known-pattern classifier moved this prediction relative to its baseline. They are directional signals, not causal proof.")
-        
-        # LLM explanation
-        with st.expander("Plain-English Summary", expanded=True):
-            if shap_df is not None:
-                top_shap = shap_explain.top_shap_contributors(
-                    shap_values, list(shap_df.columns), top_n=5
-                )
-                top_shap_list = top_shap.to_dict('records') if top_shap is not None else []
-            else:
-                top_shap_list = []
-            
-            llm_text = llm_explain.generate_explanation_with_llm(
-                order.to_dict('records')[0],
-                top_shap_list,
-                risk_score,
-                confidence,
-                risk_band_text.split(':')[0],
-                threshold,
-                use_llm=True
-            )
-            st.write(llm_text)
-            st.caption(llm_explain.get_llm_explanation_disclaimer())
-        
-        # Feedback collection
-        if include_feedback:
-            st.subheader("Record human review outcome")
-            outcome = st.radio(
-                "What was the actual outcome?",
-                ["Not yet reviewed", "Confirmed risky", "False alarm"]
-            )
-            notes = st.text_area("Optional notes")
-            
-            if st.button("Save feedback"):
-                # Generate order ID
-                order_id = str(uuid.uuid4())[:8]
-                
-                # Save to database
-                fb_db = feedback.FeedbackDatabase(FEEDBACK_DB_PATH)
-                outcome_mapping = {
-                    "Not yet reviewed": "not_yet_reviewed",
-                    "Confirmed risky": "confirmed_risky",
-                    "False alarm": "false_alarm"
-                }
-                
-                fb_db.record_feedback(
-                    order_id=order_id,
-                    order_features=order.to_dict('records')[0],
-                    model_score=risk_score,
-                    risk_band=risk_band_text,
-                    confidence=confidence,
-                    human_outcome=outcome_mapping[outcome],
-                    notes=notes
-                )
-                st.success(f"Feedback saved (Order ID: {order_id})")
-        
+            if not positive_signals.empty:
+                st.write("Signals pushing risk higher:")
+                st.dataframe(positive_signals.assign(contribution=positive_signals["contribution"].map(lambda value: f"+{value:.2f}")), hide_index=True, width="stretch")
+            if not negative_signals.empty:
+                st.write("Signals pushing risk lower:")
+                st.dataframe(negative_signals.assign(contribution=negative_signals["contribution"].map(lambda value: f"{value:.2f}")), hide_index=True, width="stretch")
+            st.caption("Contributions show how the known-pattern classifier moved this prediction relative to its baseline. They are directional signals, not causal proof.")
+        st.warning(action)
         st.info("Suggested workflow: verify payment/address details or use OTP/manual review, then record the outcome. This score supports that workflow; it does not make an autonomous decision.")
 
-
-# ============================================================================
-# TAB: DATASET
-# ============================================================================
-
-with tabs[2]:
+with data_tab:
     st.subheader("Source data and label balance")
     data_summary = st.columns(4)
     data_summary[0].metric("Orders", f"{len(data):,}")
@@ -1164,226 +887,11 @@ with tabs[2]:
     data_summary[2].metric("High-risk rate", f"{data['target'].mean():.1%}")
     data_summary[3].metric("Missing values", f"{int(data[FEATURES + ['High_Return_Risk']].isna().sum().sum()):,}")
     st.caption("The supplied dataset has 5,000 rows, balanced labels, no missing values in model fields, and no usable time variation. The label should be documented as historical or synthetic before production use.")
-    st.dataframe(data[FEATURES + ["High_Return_Risk"]].head(100), width="stretch", use_container_width=True)
+    st.dataframe(data[FEATURES + ["High_Return_Risk"]].head(100), width="stretch")
     st.bar_chart(data["High_Return_Risk"].value_counts())
     st.download_button(
         "Download source sample",
         data=data[FEATURES + ["High_Return_Risk"]].head(1000).to_csv(index=False),
         file_name="preship_return_risk_sample.csv",
         mime="text/csv",
-    )
-
-
-# ============================================================================
-# TAB: DATA DIAGNOSTICS
-# ============================================================================
-
-with tabs[3]:
-    st.subheader("Data Diagnostics")
-    
-    # Signal quality warning
-    if signal_diagnosis['warning']:
-        st.error(f"⚠️ {signal_diagnosis['warning']}")
-    
-    # Label balance
-    st.subheader("Label Balance")
-    bal_cols = st.columns(4)
-    bal_cols[0].metric("Label 0 (Safe)", f"{label_balance['label_0_count']:,}")
-    bal_cols[1].metric("Label 1 (High-risk)", f"{label_balance['label_1_count']:,}")
-    bal_cols[2].metric("High-risk rate", f"{label_balance['label_1_rate']:.1%}")
-    bal_cols[3].metric("Balance status", "✓ Balanced" if label_balance['is_balanced'] else "⚠️ Imbalanced")
-    
-    # Class means
-    st.subheader("Class Means (Numeric Features)")
-    st.dataframe(class_means, use_container_width=True)
-    st.caption("Shows mean values for each class. Large differences suggest better feature separation.")
-    
-    # Mutual information
-    st.subheader("Feature Importance (Mutual Information)")
-    mi_chart = mutual_info.set_index('Feature')['Mutual_Information'].sort_values(ascending=True)
-    st.bar_chart(mi_chart)
-    st.dataframe(mutual_info, use_container_width=True)
-    st.caption("Mutual information measures how much knowing a feature value reduces uncertainty about the target label. Higher = more informative.")
-    
-    # Relational features status
-    st.subheader("Relational Features")
-    rel_ext = relational_features.RelationalFeatureExtractor(data)
-    st.info(relational_features.get_relational_features_documentation())
-
-
-# ============================================================================
-# TAB: DRIFT MONITOR
-# ============================================================================
-
-with tabs[4]:
-    st.subheader("Drift Monitoring & Subgroup Parity")
-    st.caption("Upload a new batch CSV to compute Population Stability Index (PSI) and check for distribution shifts.")
-    
-    uploaded_file = st.file_uploader("Upload new batch CSV", type="csv")
-    
-    if uploaded_file is not None:
-        try:
-            new_batch = pd.read_csv(uploaded_file)
-            new_batch = new_batch.drop(columns=[col for col in new_batch.columns if col.startswith('Unnamed:')])
-            
-            # Compute PSI
-            psi_results = drift.compute_psi_per_feature(data, new_batch, NUMERIC_FEATURES)
-            
-            st.subheader("Population Stability Index (PSI)")
-            st.dataframe(psi_results, use_container_width=True)
-            st.caption(
-                "PSI < 0.1: stable | 0.1–0.2: minor drift | > 0.2: significant drift. "
-                "Significant drift suggests retraining may be needed."
-            )
-            
-            # Subgroup parity
-            if 'Gender' in new_batch.columns and 'State' in new_batch.columns:
-                st.subheader("Subgroup Flag-Rate Parity")
-                
-                # Score new batch
-                new_batch_scores = calibrated_model.predict_proba(new_batch[FEATURES])[:, 1]
-                new_subgroup_rates = drift.flag_rate_by_subgroup(
-                    new_batch, new_batch_scores, threshold, ['Gender', 'State']
-                )
-                
-                for subgroup_col, df in new_subgroup_rates.items():
-                    st.write(f"**{subgroup_col}**")
-                    st.dataframe(df, use_container_width=True)
-                
-                # Parity summary
-                parity = drift.parity_summary(new_subgroup_rates)
-                if len(parity) > 0:
-                    st.subheader("Parity Summary")
-                    st.dataframe(parity, use_container_width=True)
-                    st.caption(
-                        "Disparity ratio > 1.2x suggests potential fairness concerns. "
-                        "Review decision-making for subgroups with higher flag rates."
-                    )
-        
-        except Exception as e:
-            st.error(f"Error processing file: {e}")
-    
-    else:
-        # Show parity on test set
-        st.subheader("Test Set Subgroup Parity (Reference)")
-        
-        for subgroup_col, df in subgroup_flag_rates.items():
-            st.write(f"**{subgroup_col}**")
-            st.dataframe(df, use_container_width=True)
-        
-        parity = drift.parity_summary(subgroup_flag_rates)
-        if len(parity) > 0:
-            st.subheader("Parity Summary")
-            st.dataframe(parity, use_container_width=True)
-
-
-# ============================================================================
-# TAB: MODEL COMPARISON (if enabled)
-# ============================================================================
-
-if use_tree_model:
-    with tabs[tab_names.index("Model Comparison")]:
-        st.subheader("Logistic Regression vs Tree Model")
-        st.warning(model_comparison.get_tree_model_warning())
-        
-        # Train tree model
-        with st.spinner("Training LightGBM model for comparison..."):
-            x_train_preprocessed = model.named_steps['preprocessor'].fit_transform(
-                data[FEATURES]
-            ).toarray()
-            
-            tree_model = model_comparison.train_tree_model(
-                pd.DataFrame(x_train_preprocessed),
-                data['target'].values,
-                model_type='lightgbm'
-            )
-        
-        if tree_model is not None:
-            comparison_df = model_comparison.compare_models(
-                calibrated_model, tree_model,
-                x_test, y_test, tree_model_type='lightgbm'
-            )
-            
-            st.subheader("Side-by-Side Metrics")
-            st.dataframe(comparison_df, use_container_width=True, hide_index=True)
-            
-            st.info(
-                "The Logistic Regression model remains the production model. "
-                "Use this comparison for evaluation only."
-            )
-        else:
-            st.warning("LightGBM not available. Install via 'pip install lightgbm' to enable tree model comparison.")
-
-
-# ============================================================================
-# TAB: RETRAIN & FEEDBACK
-# ============================================================================
-
-with tabs[tab_names.index("Retrain & Feedback")]:
-    st.subheader("Active Learning: Feedback & Retraining")
-    
-    # Feedback stats
-    fb_db = feedback.FeedbackDatabase(FEEDBACK_DB_PATH)
-    fb_stats = fb_db.get_stats()
-    
-    stat_cols = st.columns(3)
-    stat_cols[0].metric("Total feedback records", fb_stats['total_records'])
-    stat_cols[1].metric("Confirmed risky", fb_stats['by_outcome'].get('confirmed_risky', 0))
-    stat_cols[2].metric("False alarms", fb_stats['by_outcome'].get('false_alarm', 0))
-    
-    st.caption(f"Feedback database: {fb_stats['db_path']}")
-    
-    # View feedback
-    if fb_stats['total_records'] > 0:
-        with st.expander("View feedback records"):
-            fb_records = fb_db.get_feedback_records()
-            st.dataframe(fb_records, use_container_width=True)
-    
-    # Retrain
-    st.subheader("Retrain model with feedback")
-    
-    min_feedback = st.number_input("Minimum feedback records to trigger retrain", min_value=5, value=10, step=5)
-    
-    if st.button("Retrain with feedback"):
-        if fb_stats['total_records'] < min_feedback:
-            st.warning(f"Need at least {min_feedback} feedback records. Currently have {fb_stats['total_records']}.")
-        else:
-            with st.spinner("Retraining model..."):
-                result = feedback.prepare_feedback_for_retraining(
-                    fb_db, FEATURES, min_feedback_rows=min_feedback
-                )
-                
-                if result is None:
-                    st.error(f"Not enough labeled feedback to retrain (need {min_feedback}).")
-                else:
-                    x_feedback, y_feedback = result
-                    
-                    # Retrain
-                    new_model = build_model()
-                    new_model.fit(x_feedback, y_feedback)
-                    
-                    # Evaluate on test set
-                    new_test_proba = new_model.predict_proba(x_test)[:, 1]
-                    new_metrics = metric_report(y_test, new_test_proba, threshold)
-                    
-                    # Log
-                    retraining_log = feedback.log_retraining_metrics(
-                        report, new_metrics, len(y_feedback)
-                    )
-                    
-                    st.success("Retraining complete!")
-                    st.code(retraining_log)
-                    
-                    st.subheader("New Metrics")
-                    comp_cols = st.columns(4)
-                    comp_cols[0].metric("New Precision", f"{new_metrics['precision']:.1%}", delta=f"{new_metrics['precision'] - report['precision']:+.1%}")
-                    comp_cols[1].metric("New Recall", f"{new_metrics['recall']:.1%}", delta=f"{new_metrics['recall'] - report['recall']:+.1%}")
-                    comp_cols[2].metric("New AUC-PR", f"{new_metrics['auc_pr']:.3f}", delta=f"{new_metrics['auc_pr'] - report['auc_auc']:+.3f}")
-                    comp_cols[3].metric("New ROC-AUC", f"{new_metrics['roc_auc']:.3f}", delta=f"{new_metrics['roc_auc'] - report['roc_auc']:+.3f}")
-    
-    st.info(
-        "⚠️ **Retraining Note:** "
-        "Model improvements from feedback are local to your dataset. "
-        "Always validate on a held-out test set before production deployment. "
-        "Monitor whether improvements generalize to future data."
     )
