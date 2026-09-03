@@ -52,6 +52,24 @@ This repository implements a full operational risk dashboard and supporting modu
 - `requirements.txt` — project dependencies
 - `.env` — local environment settings if used
 
+## System Architecture
+
+The application is structured as a modular Streamlit dashboard (`risk_manager_app.py`) that orchestrates specialized logic contained within the `src/` directory.
+
+### High-Level Component Interaction
+The following diagram illustrates how the core components interact to process an order and surface risk to the operator.
+
+![Risk Intelligence Flow](diagrams/D1.png)
+
+This flow begins with order data entering the dashboard, where the application validates feature completeness and prepares the record for scoring. The hybrid risk model combines a calibrated probability estimate with a novelty signal to produce a single decision-support score. That score is then passed through explainability, confidence, and monitoring layers so the operator can understand the driver of the risk, the certainty of the recommendation, and whether any related anomaly is emerging in the broader order stream.
+
+### Code Entity Mapping
+This diagram bridges the functional requirements to the specific Python classes and functions implemented in the codebase.
+
+![Code Entity Relationship Map](diagrams/D2.png)
+
+The mapping connects the UI layer to the risk-scoring pipeline, the monitoring modules, the relational feature logic, and the feedback loop. The main dashboard orchestrates model training, scoring, and display logic; the source modules handle preprocessing, calibration, feature engineering, SHAP explainability, fraud spike detection, drift diagnostics, and dispute evidence generation. This separation keeps the product modular and makes the system easier to extend as new operational signals or merchant data become available.
+
 ## Key features
 
 ### 1. Return / RTO risk scoring
@@ -210,6 +228,3 @@ This project sits directly in the AI Risk Manager track:
 - it is built to be auditable and defense-only
 - it provides a realistic and demo-ready operational risk platform that can be extended further with richer merchant data and stronger event histories
 
-## License
-
-This project is intended for educational and internal demo use. Add your preferred license before production or public release.
