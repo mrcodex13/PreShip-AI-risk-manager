@@ -1,184 +1,159 @@
-"""Relational features module: graph-based risk signals (extensible framework)."""
+"""Relational features module: graph-based risk signals and abuse-ring indicators."""
 
-import pandas as pd
-import numpy as np
-from typing import Dict, Any, Optional, List
 import logging
+from typing import Any, Dict, List, Optional, Sequence
+
+import numpy as np
+import pandas as pd
 
 
 logger = logging.getLogger(__name__)
 
 
 class RelationalFeatureExtractor:
-    """
-    Extract relational/graph-based features from order data.
-    
-    IMPORTANT: This module is designed as an extension point.
-    The current CSV lacks customer identifiers (address, phone, device, IP),
-    so all functions are no-ops. When these identifiers are added to the dataset,
-    uncomment the real implementations below.
-    
-    See FINAL_REPORT.md Section 10 for the priority to add these identifiers.
-    """
-    
+    """Simplified graph-based feature extractor for customer/order relations."""
+
     REQUIRED_COLUMNS = {
-        'velocity': ['Customer_ID', 'Order_Date'],
-        'duplicate_addresses': ['Customer_ID', 'Address'],
-        'duplicate_phones': ['Customer_ID', 'Phone'],
-        'first_time_buyer': ['Customer_ID', 'Order_Date'],
-        'high_value_cod': ['Order_Value', 'Payment_Method']
+        "velocity": ["Customer_ID", "Order_Date"],
+        "duplicate_addresses": ["Customer_ID", "Address"],
+        "duplicate_phones": ["Customer_ID", "Phone"],
+        "first_time_buyer": ["Customer_ID", "Order_Date"],
+        "high_value_cod": ["Order_Value", "Payment_Method"],
     }
-    
+
     def __init__(self, data: pd.DataFrame):
-        """
-        Initialize extractor and check for required columns.
-        
-        Args:
-            data: full dataset
-        """
-        self.data = data
+        self.data = data.copy()
         self.missing_columns = self._check_required_columns()
-        
+
         if self.missing_columns:
             logger.warning(
-                f"Relational features unavailable — dataset lacks identifiers: {self.missing_columns}. "
-                "To unlock these high-value signals, the dataset must include: "
-                "Customer_ID, Order_Date, Address, Phone, Device_ID, and IP_Address."
+                "Relational features are partial or unavailable. "
+                f"Missing identifiers: {self.missing_columns}. "
+                "When Customer_ID, Address, Phone, and Order_Date are available, the graph features below become active."
             )
-    
+
     def _check_required_columns(self) -> List[str]:
-        """Check which identifier columns are missing."""
         all_required = set()
-        for feature, cols in self.REQUIRED_COLUMNS.items():
+        for cols in self.REQUIRED_COLUMNS.values():
             all_required.update(cols)
-        
-        missing = [col for col in all_required if col not in self.data.columns]
-        return missing
-    
+        return [col for col in sorted(all_required) if col not in self.data.columns]
+
+    def _as_series(self, values: Optional[pd.Series], index: pd.Index) -> Optional[pd.Series]:
+        if values is None:
+            return None
+        series = pd.Series(values, index=index)
+        return series
+
     def extract_all(self) -> pd.DataFrame:
-        """
-        Extract all available relational features.
-        
-        Returns:
-            DataFrame with columns: order_velocity, duplicate_address_count, 
-                                   duplicate_phone_count, is_first_time_buyer, 
-                                   is_high_value_cod
-        """
         features = {
-            'order_velocity': self.order_velocity(),
-            'duplicate_address_count': self.duplicate_address_count(),
-            'duplicate_phone_count': self.duplicate_phone_count(),
-            'is_first_time_buyer': self.is_first_time_buyer(),
-            'is_high_value_cod': self.is_high_value_cod()
+            "order_velocity": self.order_velocity(),
+            "duplicate_address_count": self.duplicate_address_count(),
+            "duplicate_phone_count": self.duplicate_phone_count(),
+            "is_first_time_buyer": self.is_first_time_buyer(),
+            "is_high_value_cod": self.is_high_value_cod(),
         }
-        
-        # Filter to available features
-        available = {k: v for k, v in features.items() if v is not None}
-        
+
+        available = {key: value for key, value in features.items() if value is not None}
         if not available:
-            # Return a no-op dataframe with all NaN
-            return pd.DataFrame({
-                'order_velocity': np.nan,
-                'duplicate_address_count': np.nan,
-                'duplicate_phone_count': np.nan,
-                'is_first_time_buyer': np.nan,
-                'is_high_value_cod': np.nan
-            }, index=self.data.index)
-        
-        return pd.DataFrame(available, index=self.data.index)
-    
+            return pd.DataFrame(
+                {
+                    "order_velocity": np.nan,
+                    "duplicate_address_count": np.nan,
+                    "duplicate_phone_count": np.nan,
+                    "is_first_time_buyer": np.nan,
+                    "is_high_value_cod": np.nan,
+                    "ring_risk_score": np.nan,
+                },
+                index=self.data.index,
+            )
+
+        features_df = pd.DataFrame(available, index=self.data.index)
+        features_df["ring_risk_score"] = self.ring_risk_score(features_df)
+        return features_df
+
     def order_velocity(self) -> Optional[pd.Series]:
-        """
-        EXTENSION POINT: Orders per customer in past 7 days.
-        
-        Returns None if Customer_ID or Order_Date missing.
-        """
-        required = ['Customer_ID', 'Order_Date']
+        required = ["Customer_ID", "Order_Date"]
         if not all(col in self.data.columns for col in required):
             return None
-        
-        # TODO: Uncomment when data is available
-        # self.data['Order_Date'] = pd.to_datetime(self.data['Order_Date'])
-        # velocity = self.data.groupby('Customer_ID').size()
-        # return self.data['Customer_ID'].map(velocity)
-        
-        return None
-    
+
+        frame = self.data.copy()
+        frame["Order_Date"] = pd.to_datetime(frame["Order_Date"], errors="coerce")
+        frame["Customer_ID"] = frame["Customer_ID"].fillna("UNKNOWN").astype(str)
+        window_end = frame["Order_Date"].max()
+        if pd.isna(window_end):
+            return None
+        window_start = window_end - pd.Timedelta(days=7)
+        recent = frame[frame["Order_Date"] >= window_start].groupby("Customer_ID").size()
+        return frame["Customer_ID"].map(recent).fillna(0).astype(float)
+
     def duplicate_address_count(self) -> Optional[pd.Series]:
-        """
-        EXTENSION POINT: Count of customers at same address.
-        
-        High count = risky indicator (fraud ring, bot, etc).
-        Returns None if Address missing.
-        """
-        if 'Address' not in self.data.columns:
+        if "Address" not in self.data.columns:
             return None
-        
-        # TODO: Uncomment when data is available
-        # return self.data['Address'].map(self.data['Address'].value_counts())
-        
-        return None
-    
+
+        normalized = self.data["Address"].fillna("UNKNOWN").astype(str)
+        counts = normalized.value_counts()
+        return normalized.map(counts).fillna(0).astype(float)
+
     def duplicate_phone_count(self) -> Optional[pd.Series]:
-        """
-        EXTENSION POINT: Count of customers with same phone.
-        
-        Returns None if Phone missing.
-        """
-        if 'Phone' not in self.data.columns:
+        if "Phone" not in self.data.columns:
             return None
-        
-        # TODO: Uncomment when data is available
-        # return self.data['Phone'].map(self.data['Phone'].value_counts())
-        
-        return None
-    
+
+        normalized = self.data["Phone"].fillna("UNKNOWN").astype(str)
+        counts = normalized.value_counts()
+        return normalized.map(counts).fillna(0).astype(float)
+
     def is_first_time_buyer(self) -> Optional[pd.Series]:
-        """
-        EXTENSION POINT: First order from this customer.
-        
-        Returns None if Customer_ID or Order_Date missing.
-        """
-        required = ['Customer_ID', 'Order_Date']
+        required = ["Customer_ID", "Order_Date"]
         if not all(col in self.data.columns for col in required):
             return None
-        
-        # TODO: Uncomment when data is available
-        # self.data['Order_Date'] = pd.to_datetime(self.data['Order_Date'])
-        # first_order = self.data.groupby('Customer_ID')['Order_Date'].transform('min')
-        # return self.data['Order_Date'] == first_order
-        
-        return None
-    
+
+        frame = self.data.copy()
+        frame["Customer_ID"] = frame["Customer_ID"].fillna("UNKNOWN").astype(str)
+        frame["Order_Date"] = pd.to_datetime(frame["Order_Date"], errors="coerce")
+        first_order = frame.groupby("Customer_ID")["Order_Date"].transform("min")
+        return (frame["Order_Date"] == first_order).astype(float)
+
     def is_high_value_cod(self) -> Optional[pd.Series]:
-        """
-        EXTENSION POINT: High-value order + Cash on Delivery.
-        
-        Returns None if Order_Value or Payment_Method missing.
-        """
-        required = ['Order_Value', 'Payment_Method']
+        required = ["Order_Value", "Payment_Method"]
         if not all(col in self.data.columns for col in required):
             return None
-        
-        # TODO: Uncomment when data is available
-        # high_value_threshold = self.data['Order_Value'].quantile(0.75)
-        # is_cod = self.data['Payment_Method'].str.lower() == 'cod'
-        # return (self.data['Order_Value'] > high_value_threshold) & is_cod
-        
-        return None
+
+        value = pd.to_numeric(self.data["Order_Value"], errors="coerce")
+        threshold = value.quantile(0.75) if value.notna().any() else 0.0
+        is_cod = self.data["Payment_Method"].astype(str).str.lower().eq("cod")
+        return ((value > threshold) & is_cod).astype(float)
+
+    def ring_risk_score(self, features_df: Optional[pd.DataFrame] = None) -> pd.Series:
+        if features_df is None:
+            features_df = self.extract_all()
+
+        if features_df.empty:
+            return pd.Series(np.nan, index=self.data.index)
+
+        score_parts = []
+        for column in ["duplicate_address_count", "duplicate_phone_count", "order_velocity", "is_first_time_buyer"]:
+            if column in features_df.columns:
+                series = pd.to_numeric(features_df[column], errors="coerce").fillna(0)
+                score_parts.append(series.rank(pct=True))
+
+        if not score_parts:
+            return pd.Series(np.nan, index=self.data.index)
+
+        combined = sum(score_parts) / len(score_parts)
+        return combined.clip(0, 1).fillna(0.0)
 
 
 def get_relational_features_documentation() -> str:
     """Return a detailed explanation of relational features for the UI."""
     return (
-        "**Relational Features Status: UNAVAILABLE**\n\n"
-        "The current dataset lacks customer identifiers (address, phone, device IP) needed to compute:\n"
-        "- Order velocity (orders from same customer in past 7 days)\n"
-        "- Duplicate addresses (accounts using same address)\n"
-        "- Duplicate phones (accounts using same phone)\n"
-        "- First-time buyer flag\n"
-        "- High-value + COD combination flag\n\n"
-        "**This is the single highest-value addition for a production version.** "
-        "These signals are among the strongest fraud indicators. "
-        "See FINAL_REPORT.md Section 10 for implementation priority."
+        "**Relational / abuse-ring features**\n\n"
+        "When customer identifiers are present, the module can compute:\n"
+        "- order velocity (same customer, rolling 7-day activity)\n"
+        "- address duplication count\n"
+        "- phone duplication count\n"
+        "- first-time buyer flag\n"
+        "- high-value COD risk flag\n"
+        "- ring_risk_score (blend of duplicate-account and velocity indicators)\n\n"
+        "The current demo dataset does not include the customer linkage fields needed for production abuse-ring detection, "
+        "so these features stay dormant until operational identity data is available."
     )

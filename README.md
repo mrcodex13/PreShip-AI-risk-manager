@@ -1,14 +1,14 @@
-# PreShip AI Risk Manager
+# PreShip AI Risk Intelligence Platform
 
-A defense-only return and RTO risk-scoring dashboard for Indian e-commerce. PreShip AI helps merchants decide which orders deserve verification before dispatch, while keeping the final decision with a human reviewer.
+PreShip AI is a defense-only return and RTO risk monitoring system for digital commerce operations. It helps merchants prioritize verification for high-risk orders while keeping the final decision within a human review workflow.
 
-**Version:** 2.0 — Full feature release with calibration, uncertainty quantification, explainability enhancements, and active learning.
+**Version:** 2.0 — production-oriented release featuring calibration, uncertainty quantification, explainability, active learning, and operational monitoring.
 
-## Problem
+## Executive Summary
 
-Returns, RTO logistics, and chargebacks quietly reduce e-commerce margin. The product challenge is to build a working detector or verifier with measured performance on held-out data, explicit false-positive cost, and no offense-capable functionality.
+Returns, RTO losses, and chargeback exposure materially reduce margin in online commerce. This project provides a transparent, measurable decision-support layer for order review: it estimates risk, quantifies uncertainty, explains the drivers behind each score, and supports operational monitoring over time.
 
-## What This Project Does
+## Product Scope
 
 - Scores an order using customer, product, price, discount, quantity, rating, and state signals.
 - Combines a calibrated supervised return-risk classifier with an Isolation Forest novelty signal.

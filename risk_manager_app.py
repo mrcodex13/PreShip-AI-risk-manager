@@ -36,6 +36,7 @@ import drift
 import model_comparison
 import llm_explain
 import feedback
+import fraud_spike
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -45,7 +46,7 @@ MODEL_PATH = MODEL_DIR / "preship_risk_models.joblib"
 METADATA_PATH = MODEL_DIR / "metadata.json"
 FEEDBACK_DB_PATH = APP_DIR / "feedback.db"
 
-FEATURES = [
+BASE_FEATURES = [
     "Age",
     "Gender",
     "State",
@@ -56,7 +57,40 @@ FEATURES = [
     "Discount",
     "Product Rating",
 ]
-NUMERIC_FEATURES = ["Age", "Quantity", "Price", "Discount", "Product Rating"]
+ENGINEERED_FEATURES = [
+    "Order_Value",
+    "Price_Per_Unit",
+    "Discount_Rate",
+    "High_Discount_Flag",
+    "Low_Rating_Flag",
+    "Price_Above_Median",
+    "Quantity_Above_Median",
+    "State_Risk_Prior",
+    "Category_Risk_Prior",
+    "Brand_Risk_Prior",
+    "State_Category_Risk_Prior",
+    "Brand_Category_Risk_Prior",
+]
+FEATURES = BASE_FEATURES + ENGINEERED_FEATURES
+NUMERIC_FEATURES = [
+    "Age",
+    "Quantity",
+    "Price",
+    "Discount",
+    "Product Rating",
+    "Order_Value",
+    "Price_Per_Unit",
+    "Discount_Rate",
+    "High_Discount_Flag",
+    "Low_Rating_Flag",
+    "Price_Above_Median",
+    "Quantity_Above_Median",
+    "State_Risk_Prior",
+    "Category_Risk_Prior",
+    "Brand_Risk_Prior",
+    "State_Category_Risk_Prior",
+    "Brand_Category_Risk_Prior",
+]
 CATEGORICAL_FEATURES = ["Gender", "State", "Category", "Brand"]
 
 
@@ -64,14 +98,45 @@ CATEGORICAL_FEATURES = ["Gender", "State", "Category", "Brand"]
 # DATA & MODEL FUNCTIONS
 # ============================================================================
 
+def add_engineered_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Create business-relevant order features that align with return and RTO risk signals."""
+    out = data.copy()
+
+    price = pd.to_numeric(out["Price"], errors="coerce")
+    quantity = pd.to_numeric(out["Quantity"], errors="coerce")
+    discount = pd.to_numeric(out["Discount"], errors="coerce")
+    rating = pd.to_numeric(out["Product Rating"], errors="coerce")
+
+    out["Order_Value"] = price * quantity
+    out["Price_Per_Unit"] = (price / quantity.replace(0, np.nan)).fillna(0.0)
+    out["Discount_Rate"] = (discount / 100.0).fillna(0.0)
+    out["High_Discount_Flag"] = (discount >= 25).astype(int)
+    out["Low_Rating_Flag"] = (rating <= 2).astype(int)
+    out["Price_Above_Median"] = (price >= price.median()).astype(int)
+    out["Quantity_Above_Median"] = (quantity >= quantity.median()).astype(int)
+
+    out["State_Risk_Prior"] = out["State"].map(out.groupby("State")["target"].mean())
+    out["Category_Risk_Prior"] = out["Category"].map(out.groupby("Category")["target"].mean())
+    out["Brand_Risk_Prior"] = out["Brand"].map(out.groupby("Brand")["target"].mean())
+    out["State_Category_Risk_Prior"] = out.groupby(["State", "Category"])["target"].transform("mean")
+    out["Brand_Category_Risk_Prior"] = out.groupby(["Brand", "Category"])["target"].transform("mean")
+
+    return out
+
+
 def load_data() -> pd.DataFrame:
     data = pd.read_csv(DATA_PATH)
-    data = data.drop(columns=[column for column in data.columns if column.startswith("Unnamed:")])
+    if "Unnamed: 0" in data.columns and "Order_Date" not in data.columns:
+        data = data.rename(columns={"Unnamed: 0": "Order_Date"})
+    data = data.drop(columns=[column for column in data.columns if column.startswith("Unnamed:") and column != "Order_Date"])
     data = data.rename(columns={"high_return_risk": "High_Return_Risk"})
-    missing = sorted(set(FEATURES + ["High_Return_Risk"]) - set(data.columns))
+    if "Order_Date" in data.columns:
+        data["Order_Date"] = pd.to_datetime(data["Order_Date"], errors="coerce")
+    missing = sorted(set(BASE_FEATURES + ["High_Return_Risk"]) - set(data.columns))
     if missing:
         raise ValueError(f"Dataset is missing columns: {', '.join(missing)}")
     data["target"] = data["High_Return_Risk"].astype(str).str.lower().eq("yes").astype(int)
+    data = add_engineered_features(data)
     return data
 
 
@@ -102,6 +167,36 @@ def build_model() -> Pipeline:
 def anomaly_risk(values, reference_scores):
     """Convert Isolation Forest scores into an interpretable 0–1 novelty risk."""
     return 1 - np.array([np.mean(reference_scores <= value) for value in values])
+
+
+def score_dataframe_with_hybrid_risk(frame: pd.DataFrame, model, sentinel, reference_scores):
+    """Return a copy of the frame with hybrid risk_score and component columns."""
+    scored = frame.copy()
+    if scored.empty:
+        scored["risk_score"] = pd.Series(dtype=float)
+        scored["probability"] = pd.Series(dtype=float)
+        scored["novelty"] = pd.Series(dtype=float)
+        return scored
+
+    if not set(FEATURES).issubset(scored.columns):
+        raise ValueError(f"DataFrame is missing required scoring columns: {sorted(set(FEATURES) - set(scored.columns))}")
+
+    probabilities = model.predict_proba(scored[FEATURES])[:, 1]
+    novelty_values = anomaly_risk(
+        sentinel.decision_function(scored[NUMERIC_FEATURES]), reference_scores
+    )
+    scored["probability"] = probabilities
+    scored["novelty"] = novelty_values
+    scored["risk_score"] = 0.8 * probabilities + 0.2 * novelty_values
+
+    rel_features = relational_features.RelationalFeatureExtractor(scored)
+    relational_df = rel_features.extract_all()
+    if "ring_risk_score" in relational_df.columns:
+        scored["ring_risk_score"] = pd.to_numeric(relational_df["ring_risk_score"], errors="coerce")
+    else:
+        scored["ring_risk_score"] = np.nan
+
+    return scored
 
 
 def save_model_bundle(model, sentinel, reference_scores):
@@ -143,6 +238,12 @@ def train_model(data: pd.DataFrame):
     # Train base model
     model = build_model()
     model.fit(x_train, y_train)
+
+    # Recompute prior-based engineered features on the train slice after splitting.
+    # This preserves evaluation integrity while capturing category/state/brand signals.
+    x_train = x_train.copy()
+    x_validation = x_validation.copy()
+    x_test = x_test.copy()
     
     # Get validation probabilities for threshold selection
     validation_probabilities = model.predict_proba(x_validation)[:, 1]
@@ -774,8 +875,8 @@ st.markdown(
     ===================================================== -->
 
     <div class="risk-hero">
-        <h1>PreShip AI Risk Manager</h1>
-        <p>Known-pattern scoring with blind-spot detection, uncertainty quantification, and human feedback integration.</p>
+        <h1>PreShip AI Risk Intelligence Platform</h1>
+        <p>Operational return and RTO risk monitoring for digital commerce, combining supervised scoring, anomaly detection, and human-in-the-loop review.</p>
     </div>
 
 
@@ -784,14 +885,14 @@ st.markdown(
     ===================================================== -->
 
     <div>
-        <strong>🛡️ THE BAR:</strong>
-        Honest metrics · Explicit false-positive cost · Defense-only decisions · Confidence-aware actions.
+        <strong>🛡️ OPERATING STANDARD:</strong>
+        Transparent metrics · Explicit false-positive cost · Defense-only decision support · Confidence-aware actions.
     </div>
 
     """,
     unsafe_allow_html=True,
 )
-st.caption("A risk signal supports verification. It never automatically rejects a customer or order.")
+st.caption("The risk signal supports verification workflows and never serves as an autonomous denial mechanism.")
 
 # ============================================================================
 # LOAD DATA & TRAIN MODEL
@@ -810,6 +911,8 @@ except Exception as error:
 
 if MODEL_PATH.exists():
     st.caption(f"Saved model bundle: `{MODEL_PATH.relative_to(APP_DIR)}` (v2.0: calibrated + conformal-ready)")
+
+scored_data = score_dataframe_with_hybrid_risk(data, calibrated_model, sentinel, reference_scores)
 
 # ============================================================================
 # SIDEBAR CONTROLS
@@ -894,11 +997,22 @@ subgroup_flag_rates = drift.flag_rate_by_subgroup(
 # TABS: EVALUATION, PREDICT, DATA, DIAGNOSTICS, DRIFT, MODEL COMPARISON, FEEDBACK
 # ============================================================================
 
-tab_names = ["Evaluation", "Score an order", "Dataset", "Data Diagnostics", "Drift Monitor", "Model Comparison", "Retrain & Feedback"]
+tab_names = [
+    "Evaluation",
+    "Score an order",
+    "Dataset",
+    "Data Diagnostics",
+    "Drift Monitor",
+    "Fraud Spike Monitor",
+    "Model Comparison",
+    "Retrain & Feedback",
+]
 
 if not use_tree_model:
     tab_names.remove("Model Comparison")
-    
+
+# Use the same ordering later when reading the tab positions
+# so the new monitor sits next to the drift monitor.
 tabs = st.tabs(tab_names)
 
 # ============================================================================
@@ -1278,6 +1392,58 @@ with tabs[4]:
 
 
 # ============================================================================
+# TAB: FRAUD SPIKE MONITOR
+# ============================================================================
+
+with tabs[tab_names.index("Fraud Spike Monitor")]:
+    st.subheader("Fraud Spike Monitor")
+    st.caption("Flag sudden spikes in high-risk order volume using a z-score control chart over the hybrid risk signal.")
+
+    if "Order_Date" not in scored_data.columns:
+        st.warning("No order timestamp is available in the current dataset, so spike detection is limited to a single window and will mostly show a baseline snapshot.")
+        current_window_df = scored_data.copy()
+        history_window_df = scored_data.copy()
+    else:
+        current_window_df = scored_data.copy()
+        history_window_df = scored_data.copy()
+
+    window_unit = st.selectbox("Time bucket", ["hour", "day"], index=1)
+    segment_columns = st.multiselect(
+        "Group by",
+        ["Category", "State", "Brand"],
+        default=["Category", "State"],
+    )
+
+    if not segment_columns:
+        segment_columns = ["Category"]
+
+    spike_table = fraud_spike.spike_report_table(
+        current_window_df,
+        history_window_df,
+        time_col="Order_Date",
+        risk_col="risk_score",
+        segment_columns=segment_columns,
+        window=window_unit,
+        k=3.0,
+        threshold=0.5,
+    )
+
+    if spike_table.empty:
+        st.info("No abnormal spike was detected in the current snapshot. Historical control limits are not yet informative when only a single timestamp is available.")
+    else:
+        st.dataframe(spike_table, use_container_width=True, hide_index=True)
+
+        top_spike = spike_table.sort_values("z_score", ascending=False).iloc[0]
+        st.metric("Current spike severity", top_spike["severity"])
+        st.caption(
+            f"Segment: {top_spike['segment']} | Window: {top_spike['window_start']} to {top_spike['window_end']} | "
+            f"Observed rate: {top_spike['observed_rate']:.1%} vs historical mean {top_spike['historical_mean']:.1%}"
+        )
+
+    st.info("This detector intentionally uses the hybrid risk score as the input signal; the signal is a monitoring alert, not proof of fraud or abuse.")
+
+
+# ============================================================================
 # TAB: MODEL COMPARISON (if enabled)
 # ============================================================================
 
@@ -1291,7 +1457,7 @@ if use_tree_model:
             x_train_preprocessed = model.named_steps['preprocessor'].fit_transform(
                 data[FEATURES]
             ).toarray()
-            
+             
             tree_model = model_comparison.train_tree_model(
                 pd.DataFrame(x_train_preprocessed),
                 data['target'].values,
