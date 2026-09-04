@@ -1,5 +1,5 @@
 {
-  "saved_at_utc": "2026-09-03T19:02:39.835919+00:00",
+  "saved_at_utc": "2026-09-03T22:29:20.060971+00:00",
   "training_data": "data\\Export_Product_Return_Data.csv",
   "model_path": "models\\preship_risk_models.joblib",
   "purpose": "Defense-only return/RTO risk scoring with uncertainty quantification and human feedback integration"
